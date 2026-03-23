@@ -1,286 +1,411 @@
-import { useEffect, useState } from "react";
-import { useParams, useNavigate } from "react-router-dom";
-import { tradeService, Trade } from "@/src/db";
-import { Button } from "@/src/components/ui/button";
-import { Input } from "@/src/components/ui/input";
-import { Textarea } from "@/src/components/ui/textarea";
-import { Card, CardContent, CardHeader, CardTitle } from "@/src/components/ui/card";
-import { ArrowLeft, Save, Trash2 } from "lucide-react";
-import { doc, getDoc } from "firebase/firestore";
-import { db } from "@/src/firebase";
+import { useEffect, useState } from 'react';
+import { useParams, useNavigate } from 'react-router-dom';
+import { tradeService, tagService, Trade, Tag } from '@/src/db';
+import { uploadScreenshot } from '@/src/firebase';
+import { Button } from '@/src/components/ui/button';
+import { Input } from '@/src/components/ui/input';
+import { Textarea } from '@/src/components/ui/textarea';
+import { Card, CardContent, CardHeader, CardTitle } from '@/src/components/ui/card';
+import { TagPicker } from '@/src/components/TagPicker';
+import { calcPnl, calcRiskReward, calcHoldDuration } from '@/src/lib/calculations';
+import { ArrowLeft, Save, Trash2, Upload, Image } from 'lucide-react';
+
+const MARKETS = ['Stocks', 'ETF', 'Crypto', 'Forex', 'Futures', 'Options', 'Other'];
 
 export function TradeDetail() {
-  const { id } = useParams();
+  const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
-  const isNew = id === "new";
+  const isNew = id === 'new';
 
-  const [trade, setTrade] = useState<Trade | null>(null);
-  const [loading, setLoading] = useState(!isNew);
-  const [isDeleting, setIsDeleting] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    if (isNew) return;
-    const fetchTrade = async () => {
-      try {
-        const docRef = doc(db, tradeService.getCollectionPath(), id!);
-        const docSnap = await getDoc(docRef);
-        if (docSnap.exists()) {
-          setTrade({ id: docSnap.id, ...docSnap.data() } as Trade);
-        }
-      } catch (error) {
-        console.error("Error fetching trade", error);
-      } finally {
-        setLoading(false);
-      }
-    };
-    fetchTrade();
-  }, [id, isNew]);
-
-  const [formData, setFormData] = useState<Partial<Trade>>({
-    symbol: "",
-    side: "LONG",
-    entryDate: new Date(new Date().getTime() - new Date().getTimezoneOffset() * 60000).toISOString().slice(0, 16),
+  const [form, setForm] = useState<Partial<Trade>>({
+    symbol: '',
+    market: 'Stocks',
+    side: 'LONG',
+    entryDate: toLocalDatetime(new Date().toISOString()),
     entryPrice: 0,
     quantity: 0,
     fees: 0,
-    status: "OPEN",
+    status: 'OPEN',
     setups: [],
     mistakes: [],
     emotions: [],
-    notes: "",
+    notes: '',
   });
+  const [tags, setTags] = useState<Tag[]>([]);
+  const [loading, setLoading] = useState(!isNew);
+  const [saving, setSaving] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [error, setError] = useState('');
+  const [uploading, setUploading] = useState(false);
 
+  // Load existing trade
   useEffect(() => {
-    if (trade) {
-      setFormData({
-        ...trade,
-        entryDate: trade.entryDate ? new Date(new Date(trade.entryDate).getTime() - new Date().getTimezoneOffset() * 60000).toISOString().slice(0, 16) : "",
-        exitDate: trade.exitDate ? new Date(new Date(trade.exitDate).getTime() - new Date().getTimezoneOffset() * 60000).toISOString().slice(0, 16) : undefined,
-      });
-    }
-  }, [trade]);
+    if (isNew) return;
+    const unsub = tradeService.subscribeToTrades(
+      (trades) => {
+        const found = trades.find((t) => t.id === id);
+        if (found) {
+          setForm({
+            ...found,
+            entryDate: toLocalDatetime(found.entryDate),
+            exitDate: found.exitDate ? toLocalDatetime(found.exitDate) : undefined,
+          });
+        }
+        setLoading(false);
+      },
+      (err) => { console.error(err); setLoading(false); }
+    );
+    return unsub;
+  }, [id, isNew]);
 
-  const handleChange = (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>) => {
-    const { name, value, type } = e.target;
-    setFormData((prev) => ({
+  // Load tags
+  useEffect(() => {
+    const unsub = tagService.subscribeToTags(setTags, console.error);
+    return unsub;
+  }, []);
+
+  function set<K extends keyof Trade>(key: K, value: Trade[K]) {
+    setForm((prev) => ({ ...prev, [key]: value }));
+  }
+
+  function handleChange(e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>) {
+    const { name, value, type } = e.target as HTMLInputElement;
+    setForm((prev) => ({
       ...prev,
-      [name]: type === "number" ? Number(value) : value,
+      [name]: type === 'number' ? (value === '' ? undefined : Number(value)) : value,
     }));
-  };
+  }
 
-  const handleArrayChange = (e: React.ChangeEvent<HTMLInputElement>, field: keyof Trade) => {
-    const values = e.target.value.split(",").map((s) => s.trim()).filter(Boolean);
-    setFormData((prev) => ({ ...prev, [field]: values }));
-  };
-
-  const handleSave = async () => {
-    setError(null);
+  async function handleScreenshot(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setUploading(true);
     try {
-      if (!formData.symbol || !formData.entryDate || formData.entryPrice === undefined || formData.entryPrice === null || formData.quantity === undefined || formData.quantity === null) {
-        setError("Please fill in all required fields (Symbol, Entry Date, Entry Price, Quantity).");
-        return;
-      }
-
-      if (formData.status === "CLOSED" && (!formData.exitDate || formData.exitPrice === undefined || formData.exitPrice === null)) {
-        setError("Closed trades must have an Exit Date and Exit Price.");
-        return;
-      }
-
-      let pnl = undefined;
-      if (formData.status === "CLOSED" && formData.exitPrice !== undefined && formData.exitPrice !== null && formData.entryPrice !== undefined && formData.entryPrice !== null && formData.quantity !== undefined && formData.quantity !== null) {
-        const gross = (formData.exitPrice - formData.entryPrice) * formData.quantity;
-        pnl = formData.side === "LONG" ? gross - (formData.fees || 0) : -gross - (formData.fees || 0);
-      }
-
-      const tradeToSave = {
-        ...formData,
-        entryDate: new Date(formData.entryDate!).toISOString(),
-        exitDate: formData.exitDate ? new Date(formData.exitDate).toISOString() : undefined,
-        pnl,
-      } as Trade;
-
-      if (isNew) {
-        const { id: _id, ...newTrade } = tradeToSave;
-        await tradeService.addTrade(newTrade);
-      } else {
-        await tradeService.updateTrade(id!, tradeToSave);
-      }
-      navigate("/journal");
-    } catch (error) {
-      console.error("Failed to save trade", error);
+      const url = await uploadScreenshot(file);
+      set('screenshotUrl', url);
+    } catch {
+      setError('Screenshot upload failed. You can paste a URL below instead.');
+    } finally {
+      setUploading(false);
     }
-  };
+  }
 
-  const handleDelete = async () => {
-    if (!isNew) {
-      await tradeService.deleteTrade(id!);
-      navigate("/journal");
+  async function handleSave() {
+    setError('');
+    if (!form.symbol?.trim()) { setError('Symbol is required.'); return; }
+    if (!form.entryDate) { setError('Entry date is required.'); return; }
+    if (!form.entryPrice || !form.quantity) { setError('Entry price and quantity are required.'); return; }
+    if (form.status === 'CLOSED' && (!form.exitDate || !form.exitPrice)) {
+      setError('Exit date and price are required for closed trades.'); return;
     }
-  };
 
-  if (loading) return <div>Loading...</div>;
+    let pnl: number | undefined;
+    if (form.status === 'CLOSED' && form.exitPrice != null && form.entryPrice != null && form.quantity != null) {
+      pnl = calcPnl(form.side!, form.entryPrice, form.exitPrice, form.quantity, form.fees ?? 0);
+    }
+
+    const trade: Omit<Trade, 'id'> = {
+      symbol: form.symbol!.toUpperCase().trim(),
+      market: form.market,
+      side: form.side ?? 'LONG',
+      entryDate: new Date(form.entryDate!).toISOString(),
+      exitDate: form.exitDate ? new Date(form.exitDate).toISOString() : undefined,
+      entryPrice: form.entryPrice!,
+      exitPrice: form.exitPrice,
+      quantity: form.quantity!,
+      fees: form.fees ?? 0,
+      stopLoss: form.stopLoss,
+      takeProfit: form.takeProfit,
+      notes: form.notes ?? '',
+      screenshotUrl: form.screenshotUrl,
+      setups: form.setups ?? [],
+      mistakes: form.mistakes ?? [],
+      emotions: form.emotions ?? [],
+      pnl,
+      status: form.status ?? 'OPEN',
+    };
+
+    setSaving(true);
+    try {
+      if (isNew) await tradeService.addTrade(trade);
+      else await tradeService.updateTrade(id!, trade);
+      navigate('/app/journal');
+    } catch (err) {
+      setError('Failed to save trade. Please try again.');
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function handleDelete() {
+    if (!id || isNew) return;
+    setSaving(true);
+    try {
+      await tradeService.deleteTrade(id);
+      navigate('/app/journal');
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  // Derived display values
+  const previewPnl =
+    form.status === 'CLOSED' && form.exitPrice && form.entryPrice && form.quantity
+      ? calcPnl(form.side ?? 'LONG', form.entryPrice, form.exitPrice, form.quantity, form.fees ?? 0)
+      : null;
+  const rr = calcRiskReward(form.side ?? 'LONG', form.entryPrice ?? 0, form.stopLoss, form.takeProfit);
+  const holdDuration =
+    form.exitDate && form.entryDate
+      ? calcHoldDuration(new Date(form.entryDate).toISOString(), new Date(form.exitDate).toISOString())
+      : null;
+
+  if (loading) return <div className="flex items-center justify-center h-64 text-muted-foreground">Loading…</div>;
 
   return (
-    <div className="space-y-6 max-w-4xl mx-auto">
+    <div className="space-y-6 max-w-5xl mx-auto">
+      {/* Header */}
       <div className="flex items-center justify-between">
-        <div className="flex items-center space-x-4">
-          <Button variant="ghost" size="icon" onClick={() => navigate("/journal")}>
+        <div className="flex items-center space-x-3">
+          <Button variant="ghost" size="icon" onClick={() => navigate('/app/journal')}>
             <ArrowLeft className="h-4 w-4" />
           </Button>
-          <h1 className="text-3xl font-bold tracking-tight">{isNew ? "Log New Trade" : "Edit Trade"}</h1>
+          <h1 className="text-2xl font-bold tracking-tight">
+            {isNew ? 'Log New Trade' : `Edit — ${form.symbol ?? ''}`}
+          </h1>
         </div>
         <div className="flex items-center space-x-2">
           {!isNew && (
-            isDeleting ? (
-              <div className="flex items-center space-x-2 mr-2">
-                <span className="text-sm text-red-500 font-medium">Delete?</span>
-                <Button variant="outline" size="sm" onClick={() => setIsDeleting(false)}>Cancel</Button>
-                <Button variant="destructive" size="sm" onClick={handleDelete}>Yes</Button>
+            deleting ? (
+              <div className="flex items-center space-x-2">
+                <span className="text-sm text-rose-500 font-medium">Delete this trade?</span>
+                <Button variant="outline" size="sm" onClick={() => setDeleting(false)}>Cancel</Button>
+                <Button variant="destructive" size="sm" onClick={handleDelete} disabled={saving}>
+                  Delete
+                </Button>
               </div>
             ) : (
-              <Button variant="destructive" size="icon" onClick={() => setIsDeleting(true)}>
-                <Trash2 className="h-4 w-4" />
+              <Button variant="outline" size="icon" onClick={() => setDeleting(true)}>
+                <Trash2 className="h-4 w-4 text-rose-500" />
               </Button>
             )
           )}
-          <Button onClick={handleSave}>
-            <Save className="mr-2 h-4 w-4" /> Save Trade
+          <Button onClick={handleSave} disabled={saving}>
+            <Save className="mr-2 h-4 w-4" />
+            {saving ? 'Saving…' : 'Save Trade'}
           </Button>
         </div>
       </div>
 
       {error && (
-        <div className="bg-red-500/10 text-red-500 p-3 rounded-md text-sm font-medium">
+        <div className="bg-rose-500/10 text-rose-400 text-sm p-3 rounded-md border border-rose-500/20">
           {error}
         </div>
       )}
 
       <div className="grid gap-6 md:grid-cols-2">
+        {/* Core details */}
         <Card>
-          <CardHeader>
-            <CardTitle>Trade Details</CardTitle>
-          </CardHeader>
+          <CardHeader><CardTitle>Trade Details</CardTitle></CardHeader>
           <CardContent className="space-y-4">
             <div className="grid grid-cols-2 gap-4">
-              <div className="space-y-2">
-                <label className="text-sm font-medium">Symbol</label>
-                <Input name="symbol" value={formData.symbol} onChange={handleChange} placeholder="AAPL" />
+              <div className="space-y-1.5">
+                <label className="text-sm font-medium">Symbol *</label>
+                <Input name="symbol" value={form.symbol ?? ''} onChange={handleChange}
+                  placeholder="AAPL" className="uppercase" />
               </div>
-              <div className="space-y-2">
-                <label className="text-sm font-medium">Side</label>
-                <select
-                  name="side"
-                  value={formData.side}
-                  onChange={handleChange}
-                  className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
-                >
-                  <option value="LONG">LONG</option>
-                  <option value="SHORT">SHORT</option>
+              <div className="space-y-1.5">
+                <label className="text-sm font-medium">Market</label>
+                <select name="market" value={form.market ?? 'Stocks'} onChange={handleChange}
+                  className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm">
+                  {MARKETS.map((m) => <option key={m} value={m}>{m}</option>)}
                 </select>
               </div>
             </div>
 
             <div className="grid grid-cols-2 gap-4">
-              <div className="space-y-2">
-                <label className="text-sm font-medium">Entry Date</label>
-                <Input type="datetime-local" name="entryDate" value={formData.entryDate} onChange={handleChange} />
+              <div className="space-y-1.5">
+                <label className="text-sm font-medium">Side *</label>
+                <select name="side" value={form.side ?? 'LONG'} onChange={handleChange}
+                  className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm">
+                  <option value="LONG">LONG</option>
+                  <option value="SHORT">SHORT</option>
+                </select>
               </div>
-              <div className="space-y-2">
-                <label className="text-sm font-medium">Entry Price</label>
-                <Input type="number" step="0.01" name="entryPrice" value={formData.entryPrice} onChange={handleChange} />
+              <div className="space-y-1.5">
+                <label className="text-sm font-medium">Status</label>
+                <select name="status" value={form.status ?? 'OPEN'} onChange={handleChange}
+                  className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm">
+                  <option value="OPEN">OPEN</option>
+                  <option value="CLOSED">CLOSED</option>
+                </select>
               </div>
             </div>
 
             <div className="grid grid-cols-2 gap-4">
-              <div className="space-y-2">
-                <label className="text-sm font-medium">Quantity</label>
-                <Input type="number" name="quantity" value={formData.quantity} onChange={handleChange} />
+              <div className="space-y-1.5">
+                <label className="text-sm font-medium">Entry Date *</label>
+                <Input type="datetime-local" name="entryDate" value={form.entryDate ?? ''} onChange={handleChange} />
               </div>
-              <div className="space-y-2">
+              <div className="space-y-1.5">
+                <label className="text-sm font-medium">Entry Price *</label>
+                <Input type="number" step="0.01" name="entryPrice" value={form.entryPrice ?? ''} onChange={handleChange} />
+              </div>
+            </div>
+
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-1.5">
+                <label className="text-sm font-medium">Quantity *</label>
+                <Input type="number" step="any" name="quantity" value={form.quantity ?? ''} onChange={handleChange} />
+              </div>
+              <div className="space-y-1.5">
                 <label className="text-sm font-medium">Fees</label>
-                <Input type="number" step="0.01" name="fees" value={formData.fees} onChange={handleChange} />
+                <Input type="number" step="0.01" name="fees" value={form.fees ?? ''} onChange={handleChange} placeholder="0" />
               </div>
             </div>
 
             <div className="grid grid-cols-2 gap-4">
-              <div className="space-y-2">
+              <div className="space-y-1.5">
                 <label className="text-sm font-medium">Stop Loss</label>
-                <Input type="number" step="0.01" name="stopLoss" value={formData.stopLoss || ""} onChange={handleChange} />
+                <Input type="number" step="0.01" name="stopLoss" value={form.stopLoss ?? ''} onChange={handleChange} placeholder="Optional" />
               </div>
-              <div className="space-y-2">
+              <div className="space-y-1.5">
                 <label className="text-sm font-medium">Take Profit</label>
-                <Input type="number" step="0.01" name="takeProfit" value={formData.takeProfit || ""} onChange={handleChange} />
+                <Input type="number" step="0.01" name="takeProfit" value={form.takeProfit ?? ''} onChange={handleChange} placeholder="Optional" />
               </div>
             </div>
           </CardContent>
         </Card>
 
+        {/* Exit + derived */}
         <Card>
-          <CardHeader>
-            <CardTitle>Exit & Performance</CardTitle>
-          </CardHeader>
+          <CardHeader><CardTitle>Exit & Performance</CardTitle></CardHeader>
           <CardContent className="space-y-4">
-            <div className="space-y-2">
-              <label className="text-sm font-medium">Status</label>
-              <select
-                name="status"
-                value={formData.status}
-                onChange={handleChange}
-                className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
-              >
-                <option value="OPEN">OPEN</option>
-                <option value="CLOSED">CLOSED</option>
-              </select>
-            </div>
-
-            {formData.status === "CLOSED" && (
-              <>
-                <div className="grid grid-cols-2 gap-4">
-                  <div className="space-y-2">
-                    <label className="text-sm font-medium">Exit Date</label>
-                    <Input type="datetime-local" name="exitDate" value={formData.exitDate || ""} onChange={handleChange} />
-                  </div>
-                  <div className="space-y-2">
-                    <label className="text-sm font-medium">Exit Price</label>
-                    <Input type="number" step="0.01" name="exitPrice" value={formData.exitPrice || ""} onChange={handleChange} />
-                  </div>
+            {form.status === 'CLOSED' && (
+              <div className="grid grid-cols-2 gap-4">
+                <div className="space-y-1.5">
+                  <label className="text-sm font-medium">Exit Date *</label>
+                  <Input type="datetime-local" name="exitDate" value={form.exitDate ?? ''} onChange={handleChange} />
                 </div>
-              </>
+                <div className="space-y-1.5">
+                  <label className="text-sm font-medium">Exit Price *</label>
+                  <Input type="number" step="0.01" name="exitPrice" value={form.exitPrice ?? ''} onChange={handleChange} />
+                </div>
+              </div>
             )}
 
-            <div className="space-y-2">
-              <label className="text-sm font-medium">Setups (comma separated)</label>
-              <Input value={formData.setups?.join(", ")} onChange={(e) => handleArrayChange(e, "setups")} placeholder="Breakout, Pullback..." />
+            {/* Derived preview */}
+            <div className="grid grid-cols-3 gap-3 p-3 bg-muted/40 rounded-lg">
+              <div>
+                <p className="text-xs text-muted-foreground">Est. P&L</p>
+                <p className={`text-sm font-bold ${previewPnl == null ? '' : previewPnl >= 0 ? 'text-emerald-500' : 'text-rose-500'}`}>
+                  {previewPnl == null ? 'N/A' : `${previewPnl >= 0 ? '+' : ''}$${previewPnl.toFixed(2)}`}
+                </p>
+              </div>
+              <div>
+                <p className="text-xs text-muted-foreground">Risk/Reward</p>
+                <p className="text-sm font-bold">{rr != null ? `${rr.toFixed(2)}:1` : 'N/A'}</p>
+              </div>
+              <div>
+                <p className="text-xs text-muted-foreground">Hold Time</p>
+                <p className="text-sm font-bold">{holdDuration ?? 'N/A'}</p>
+              </div>
             </div>
 
+            {/* Screenshot */}
             <div className="space-y-2">
-              <label className="text-sm font-medium">Mistakes (comma separated)</label>
-              <Input value={formData.mistakes?.join(", ")} onChange={(e) => handleArrayChange(e, "mistakes")} placeholder="FOMO, Early Exit..." />
-            </div>
-
-            <div className="space-y-2">
-              <label className="text-sm font-medium">Emotions (comma separated)</label>
-              <Input value={formData.emotions?.join(", ")} onChange={(e) => handleArrayChange(e, "emotions")} placeholder="Anxious, Confident..." />
+              <label className="text-sm font-medium flex items-center space-x-2">
+                <Image className="h-4 w-4" />
+                <span>Screenshot</span>
+              </label>
+              <div className="flex items-center space-x-2">
+                <label className="cursor-pointer">
+                  <input type="file" accept="image/*" className="hidden" onChange={handleScreenshot} />
+                  <Button type="button" variant="outline" size="sm" asChild>
+                    <span>
+                      <Upload className="mr-2 h-3 w-3" />
+                      {uploading ? 'Uploading…' : 'Upload Image'}
+                    </span>
+                  </Button>
+                </label>
+              </div>
+              <Input
+                name="screenshotUrl"
+                value={form.screenshotUrl ?? ''}
+                onChange={handleChange}
+                placeholder="Or paste an image URL…"
+                className="text-xs"
+              />
+              {form.screenshotUrl && (
+                <img
+                  src={form.screenshotUrl}
+                  alt="Trade screenshot"
+                  className="w-full rounded-md border border-border object-contain max-h-48"
+                  onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
+                />
+              )}
             </div>
           </CardContent>
         </Card>
 
-        <Card className="md:col-span-2">
-          <CardHeader>
-            <CardTitle>Notes</CardTitle>
-          </CardHeader>
+        {/* Setups */}
+        <Card>
+          <CardHeader><CardTitle>Setups</CardTitle></CardHeader>
+          <CardContent>
+            <TagPicker
+              category="SETUP"
+              selected={form.setups ?? []}
+              onChange={(v) => set('setups', v)}
+              allTags={tags}
+            />
+          </CardContent>
+        </Card>
+
+        {/* Mistakes */}
+        <Card>
+          <CardHeader><CardTitle>Mistakes</CardTitle></CardHeader>
+          <CardContent>
+            <TagPicker
+              category="MISTAKE"
+              selected={form.mistakes ?? []}
+              onChange={(v) => set('mistakes', v)}
+              allTags={tags}
+            />
+          </CardContent>
+        </Card>
+
+        {/* Emotions */}
+        <Card>
+          <CardHeader><CardTitle>Emotions</CardTitle></CardHeader>
+          <CardContent>
+            <TagPicker
+              category="EMOTION"
+              selected={form.emotions ?? []}
+              onChange={(v) => set('emotions', v)}
+              allTags={tags}
+            />
+          </CardContent>
+        </Card>
+
+        {/* Notes */}
+        <Card>
+          <CardHeader><CardTitle>Notes</CardTitle></CardHeader>
           <CardContent>
             <Textarea
               name="notes"
-              value={formData.notes}
+              value={form.notes ?? ''}
               onChange={handleChange}
-              placeholder="What were you thinking during this trade?"
-              className="min-h-[150px]"
+              placeholder="What were you thinking? What happened? What would you do differently?"
+              className="min-h-[120px]"
             />
           </CardContent>
         </Card>
       </div>
     </div>
   );
+}
+
+function toLocalDatetime(iso: string): string {
+  const d = new Date(iso);
+  const offset = d.getTimezoneOffset() * 60_000;
+  return new Date(d.getTime() - offset).toISOString().slice(0, 16);
 }
