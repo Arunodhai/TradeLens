@@ -1,0 +1,97 @@
+{
+  "entities": {
+    "Trade": {
+      "title": "Trade",
+      "description": "A single trade logged by a user.",
+      "type": "object",
+      "properties": {
+        "symbol": {
+          "type": "string",
+          "description": "The ticker symbol traded."
+        },
+        "side": {
+          "type": "string",
+          "enum": ["LONG", "SHORT"],
+          "description": "The direction of the trade."
+        },
+        "entryDate": {
+          "type": "string",
+          "format": "date-time",
+          "description": "The date and time the trade was entered."
+        },
+        "exitDate": {
+          "type": "string",
+          "format": "date-time",
+          "description": "The date and time the trade was exited."
+        },
+        "entryPrice": {
+          "type": "number",
+          "description": "The price at which the trade was entered."
+        },
+        "exitPrice": {
+          "type": "number",
+          "description": "The price at which the trade was exited."
+        },
+        "quantity": {
+          "type": "number",
+          "description": "The number of shares/contracts traded."
+        },
+        "fees": {
+          "type": "number",
+          "description": "The total fees paid for the trade."
+        },
+        "stopLoss": {
+          "type": "number",
+          "description": "The stop loss price."
+        },
+        "takeProfit": {
+          "type": "number",
+          "description": "The take profit price."
+        },
+        "notes": {
+          "type": "string",
+          "description": "Any notes about the trade."
+        },
+        "setups": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "The setups used for the trade."
+        },
+        "mistakes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Any mistakes made during the trade."
+        },
+        "emotions": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Emotions felt during the trade."
+        },
+        "pnl": {
+          "type": "number",
+          "description": "The net profit/loss of the trade."
+        },
+        "status": {
+          "type": "string",
+          "enum": ["OPEN", "CLOSED"],
+          "description": "The current status of the trade."
+        }
+      },
+      "required": ["symbol", "side", "entryDate", "entryPrice", "quantity", "status"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}/trades/{tradeId}": {
+      "schema": {
+        "$ref": "#/entities/Trade"
+      },
+      "description": "The trades logged by a specific user."
+    }
+  }
+}

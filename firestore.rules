@@ -1,0 +1,129 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // ===============================================================
+    // Assumed Data Model
+    // ===============================================================
+    //
+    // Collection: users/{userId}/trades
+    // Document ID: auto-generated
+    // Fields:
+    //   - symbol: string (required, < 20 chars)
+    //   - side: string (required, 'LONG' or 'SHORT')
+    //   - entryDate: string (required, ISO 8601)
+    //   - exitDate: string (optional, ISO 8601)
+    //   - entryPrice: number (required, >= 0)
+    //   - exitPrice: number (optional, >= 0)
+    //   - quantity: number (required, > 0)
+    //   - fees: number (optional, >= 0)
+    //   - stopLoss: number (optional, >= 0)
+    //   - takeProfit: number (optional, >= 0)
+    //   - notes: string (optional, < 5000 chars)
+    //   - setups: list of strings (optional, each < 50 chars, max 20 items)
+    //   - mistakes: list of strings (optional, each < 50 chars, max 20 items)
+    //   - emotions: list of strings (optional, each < 50 chars, max 20 items)
+    //   - pnl: number (optional)
+    //   - status: string (required, 'OPEN' or 'CLOSED')
+    //
+    // ===============================================================
+
+    // ===============================================================
+    // Helper Functions
+    // ===============================================================
+    
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+    
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    function hasRequiredFields(fields) {
+      return request.resource.data.keys().hasAll(fields);
+    }
+
+    function isValidStringLength(field, minLen, maxLen) {
+      return request.resource.data[field] is string &&
+        request.resource.data[field].size() >= minLen &&
+        request.resource.data[field].size() <= maxLen;
+    }
+
+    function isValidOptionalString(field, minLen, maxLen) {
+      return !(field in request.resource.data) ||
+             (request.resource.data[field] is string &&
+              request.resource.data[field].size() >= minLen &&
+              request.resource.data[field].size() <= maxLen);
+    }
+
+    function isValidDateString(dateStr) {
+      return dateStr is string && dateStr.size() >= 10;
+    }
+
+    function isValidOptionalDateString(field) {
+      return !(field in request.resource.data) || isValidDateString(request.resource.data[field]);
+    }
+
+    function isValidNumber(field) {
+      return request.resource.data[field] is number;
+    }
+
+    function isValidOptionalNumber(field) {
+      return !(field in request.resource.data) || request.resource.data[field] is number;
+    }
+
+    function isValidPositiveNumber(field) {
+      return request.resource.data[field] is number && request.resource.data[field] >= 0;
+    }
+
+    function isValidOptionalPositiveNumber(field) {
+      return !(field in request.resource.data) || (request.resource.data[field] is number && request.resource.data[field] >= 0);
+    }
+
+    function isValidStringList(listField, maxItems, maxStringLen) {
+      return !(listField in request.resource.data) ||
+             (request.resource.data[listField] is list &&
+              request.resource.data[listField].size() <= maxItems);
+    }
+
+    // ===============================================================
+    // Domain Validators
+    // ===============================================================
+
+    function isValidTrade() {
+      return hasRequiredFields(['symbol', 'side', 'entryDate', 'entryPrice', 'quantity', 'status']) &&
+             isValidStringLength('symbol', 1, 20) &&
+             request.resource.data.side in ['LONG', 'SHORT'] &&
+             isValidDateString(request.resource.data.entryDate) &&
+             isValidOptionalDateString('exitDate') &&
+             isValidPositiveNumber('entryPrice') &&
+             isValidOptionalPositiveNumber('exitPrice') &&
+             request.resource.data.quantity is number && request.resource.data.quantity > 0 &&
+             isValidOptionalPositiveNumber('fees') &&
+             isValidOptionalPositiveNumber('stopLoss') &&
+             isValidOptionalPositiveNumber('takeProfit') &&
+             isValidOptionalString('notes', 0, 5000) &&
+             isValidStringList('setups', 20, 50) &&
+             isValidStringList('mistakes', 20, 50) &&
+             isValidStringList('emotions', 20, 50) &&
+             isValidOptionalNumber('pnl') &&
+             request.resource.data.status in ['OPEN', 'CLOSED'];
+    }
+
+    // ===============================================================
+    // Rules
+    // ===============================================================
+
+    match /users/{userId} {
+      allow read, write: if false; // No direct access to user document yet
+      
+      match /trades/{tradeId} {
+        allow read: if isOwner(userId);
+        allow create: if isOwner(userId) && isValidTrade();
+        allow update: if isOwner(userId) && isValidTrade();
+        allow delete: if isOwner(userId);
+      }
+    }
+  }
+}
